@@ -1,0 +1,232 @@
+name: Deploy Tool to Kinsta WP
+
+on:
+  workflow_dispatch:
+    inputs:
+      TOOL_SLUG:
+        description: 'Slug to use for folder and WP page (e.g. roi-calculator)'
+        required: true
+      TOOL_TITLE:
+        description: 'Title of the WordPress page (e.g. ROI Calculator)'
+        required: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    env:
+      SLUG: ${{ github.event.inputs.TOOL_SLUG }}
+      TITLE: ${{ github.event.inputs.TOOL_TITLE }}
+      THEME: exotel  # 🔁 Replace with your actual theme name
+
+    steps:
+      - name: Checkout Repo
+        uses: actions/checkout@v4
+
+      - name: Overwrite vite.config.ts
+        run: |
+          cat > vite.config.ts <<EOF
+          import { defineConfig } from "vite";
+          import react from "@vitejs/plugin-react-swc";
+          import fs from "fs";
+          import path from "path";
+          import { componentTagger } from "lovable-tagger";
+          
+          export default defineConfig(({ mode }) => {
+            const isDev = mode === "development";
+            const basePath = isDev
+              ? "/"
+              : "/wp-content/themes/"+process.env.THEME+"/tools/"+process.env.SLUG+"/";
+          
+            return {
+              base: basePath,
+              server: {
+                host: "::",
+                port: 8080,
+              },
+              build: {
+                outDir: "dist",
+                assetsDir: "assets",
+              },
+              plugins: [
+                react(),
+                isDev && componentTagger(),
+          
+                // Rename index.html → index.php
+                {
+                  name: "rename-index-to-php",
+                  closeBundle() {
+                    const distPath = path.resolve(__dirname, "dist");
+                    const indexHtml = path.join(distPath, "index.html");
+                    const indexPhp = path.join(distPath, "index.php");
+                    if (fs.existsSync(indexHtml)) {
+                      fs.renameSync(indexHtml, indexPhp);
+                      console.log("✅ index.html renamed to index.php");
+                    }
+                  },
+                },
+          
+                // Replace :root → :root, :host
+                {
+                  name: "replace-root-selector",
+                  closeBundle() {
+                    const distAssets = path.resolve(__dirname, "dist/assets");
+                    if (fs.existsSync(distAssets)) {
+                      const files = fs.readdirSync(distAssets);
+                      for (const file of files) {
+                        if (file.endsWith(".css")) {
+                          const filePath = path.join(distAssets, file);
+                          let content = fs.readFileSync(filePath, "utf8");
+                          content = content.replace(/:root\b/g, ":root, :host");
+                          fs.writeFileSync(filePath, content, "utf8");
+                          console.log(`🎨 Updated :root selector in ${file}`);
+                        }
+                      }
+                    }
+                  },
+                },
+              ].filter(Boolean),
+              resolve: {
+                alias: {
+                  "@": path.resolve(__dirname, "./src"),
+                },
+              },
+            };
+          });
+          EOF
+
+      - name: Overwrite main.tsx
+        run: |
+          cat > src/main.tsx <<EOF
+          import React from 'react';
+          import { createRoot } from 'react-dom/client';
+          import App from './App.tsx';
+          import cssUrl from './index.css?url';
+
+          const rootElement = document.getElementById('root');
+          if (!rootElement) throw new Error('Failed to find the root element');
+          const shadow = rootElement.attachShadow({ mode: 'open' });
+
+          const link = document.createElement('link');
+          link.setAttribute('rel', 'stylesheet');
+          link.setAttribute('href', cssUrl);
+          shadow.appendChild(link);
+
+          const container = document.createElement('div');
+          container.style.cssText = "--tw-translate-x: 0;--tw-translate-y: 0;--tw-rotate: 0;--tw-skew-x: 0;--tw-skew-y: 0;--tw-scale-x: 1;--tw-scale-y: 1;--tw-blur: 0;--tw-brightness: 1;--tw-contrast: 1;--tw-grayscale: 0;--tw-hue-rotate: 0deg;--tw-invert: 0;--tw-saturate: 1;--tw-sepia: 0;--tw-backdrop-blur: 0;--tw-backdrop-brightness: 1;--tw-backdrop-contrast: 1;--tw-backdrop-grayscale: 0;--tw-backdrop-hue-rotate: 0deg;--tw-backdrop-invert: 0;--tw-backdrop-opacity: 1;--tw-backdrop-saturate: 1;--tw-backdrop-sepia: 0;--tw-shadow: 0 0 #0000;--tw-shadow-colored: 0 0 #0000;--tw-ring-inset: ;--tw-ring-offset-width: 0px;--tw-ring-offset-color: #fff;--tw-ring-color: rgb(59 130 246 / 0.5);--tw-ring-offset-shadow: 0 0 #0000;--tw-ring-shadow: 0 0 #0000;--tw-outline-color: transparent;--tw-border-opacity: 1;--tw-bg-opacity: 1;--tw-text-opacity: 1;--tw-gradient-from: transparent;--tw-gradient-to: transparent;--tw-gradient-stops: var(--tw-gradient-from), var(--tw-gradient-to);--tw-divide-x-reverse: 0;--tw-divide-y-reverse: 0;--tw-space-x-reverse: 0;--tw-space-y-reverse: 0;";
+          shadow.appendChild(container);
+
+          const root = createRoot(container);
+          root.render(<App />);
+
+          EOF
+
+      - name: Overwrite App.tsx
+        run: |
+          cat > src/App.tsx <<EOF
+          import React from "react";
+          import { Toaster } from "@/components/ui/toaster";
+          import { Toaster as Sonner } from "@/components/ui/sonner";
+          import { TooltipProvider } from "@/components/ui/tooltip";
+          import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+          import { BrowserRouter, Routes, Route } from "react-router-dom";
+          import Index from "./pages/Index";
+          import NotFound from "./pages/NotFound";
+
+          const App: React.FC = () => {
+            const queryClient = new QueryClient();
+
+            return (
+              <React.StrictMode>
+                <QueryClientProvider client={queryClient}>
+                  <TooltipProvider>
+                    <Toaster />
+                    <Sonner />
+                    <BrowserRouter basename="/${{ env.SLUG }}">
+                      <Routes>
+                        <Route path="/" element={<Index />} />
+                        <Route path="*" element={<NotFound />} />
+                      </Routes>
+                    </BrowserRouter>
+                  </TooltipProvider>
+                </QueryClientProvider>
+              </React.StrictMode>
+            );
+          };
+
+          export default App;
+          EOF
+
+      - name: Update package.json homepage
+        run: |
+          jq '. + {homepage: "/tools/${{ env.SLUG }}"}' package.json > temp && mv temp package.json
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install Dependencies
+        run: npm install
+
+      - name: Build Project
+        run: npm run build
+
+      - name: Setup SSH Key
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.KINSTA_SSH_KEY }}" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          ssh-keyscan -p ${{ secrets.KINSTA_SSH_PORT }} -H ${{ secrets.KINSTA_HOST }} >> ~/.ssh/known_hosts
+
+      - name: Deploy to Kinsta Server (with backup if folder exists)
+        run: |
+          ssh -p ${{ secrets.KINSTA_SSH_PORT }} ${{ secrets.KINSTA_USER }}@${{ secrets.KINSTA_HOST }} 'bash -s' <<'EOF'
+            SLUG="${{ env.SLUG }}"
+            THEME="${{ env.THEME }}"
+            BASE_PATH="/www/exotel_848/public/exotel/public/wp-content/themes/$THEME/tools"
+            FOLDER_PATH="$BASE_PATH/$SLUG"
+            TIMESTAMP=$(date +"%Y%m%d-%H%M%S")
+
+            if [ -d "$FOLDER_PATH" ]; then
+              echo "⚠️ Folder exists. Renaming to $FOLDER_PATH-$TIMESTAMP"
+              mv "$FOLDER_PATH" "$FOLDER_PATH-$TIMESTAMP"
+            fi
+
+            mkdir -p "$FOLDER_PATH"
+          EOF
+
+      - name: Upload Files to Kinsta
+        run: |
+          rsync -e "ssh -p ${{ secrets.KINSTA_SSH_PORT }}" -avz ./dist/index.php ./dist/assets \
+            ${{ secrets.KINSTA_USER }}@${{ secrets.KINSTA_HOST }}:/www/exotel_848/public/exotel/public/wp-content/themes/${{ env.THEME }}/tools/${{ env.SLUG }}/
+
+      - name: Create or Update WP Page and Set ACF Field
+        run: |
+          TIMESTAMP=$(date +"%Y%m%d-%H%M%S")
+          ssh -p ${{ secrets.KINSTA_SSH_PORT }} ${{ secrets.KINSTA_USER }}@${{ secrets.KINSTA_HOST }} 'bash -s' <<EOF
+          cd /www/exotel_848/public/exotel/public
+
+          SLUG="${{ env.SLUG }}"
+          TITLE="${{ env.TITLE }}"
+
+          PAGE_ID=\$(wp post list --post_type=page --name="\$SLUG" --field=ID)
+
+          if [ -z "\$PAGE_ID" ]; then
+            echo "🆕 Page doesn't exist, creating..."
+            PAGE_ID=\$(wp post create --post_type=page --post_title="\$TITLE" --post_name="\$SLUG" --post_status=publish --porcelain)
+          else
+            echo "✅ Page exists (ID: \$PAGE_ID), updating..."
+            wp post update "\$PAGE_ID" --post_title="\$TITLE" --post_status=publish
+          fi
+
+          echo "🔧 Assigning template and ACF fields..."
+          wp post meta update "\$PAGE_ID" _wp_page_template "template/tpl-tools.php"
+          wp post meta update "\$PAGE_ID" spa_tool_folder "\$SLUG"
+
+          echo "✅ WP Page setup complete: ID=\$PAGE_ID"
+          EOF
+
+      - name: Print Tool URL
+        run: |
+          echo "✅ Tool live at: https://env-exotel-regalixstage.kinsta.cloud/${{ env.SLUG }}"
